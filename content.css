@@ -1,0 +1,7 @@
+#tm-draft-checker { position:fixed; z-index:100001; right:12px; top:140px; width:300px; max-height:65vh; overflow:auto; resize:both; color:#fff; background:#20242d; border:2px solid #718096; border-radius:8px; font:13px/1.4 system-ui,sans-serif; }
+#tm-draft-checker header { display:flex; justify-content:space-between; padding:8px; cursor:move; touch-action:none; background:#343c4a; }
+#tm-draft-checker button { cursor:pointer; }
+#tm-draft-checker .body { padding:8px; }
+#tm-draft-checker p { margin:0 0 8px; }
+#tm-draft-checker section { border-top:1px solid #566; padding:6px 0; }
+#tm-draft-checker .guess { font-weight:800; color:#ffd267; }

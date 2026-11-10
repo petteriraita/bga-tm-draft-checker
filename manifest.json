@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "Terraforming Mars Draft Checker",
+  "version": "0.1.0",
+  "description": "Record passed draft cards and estimate opponent choices using generation and map statistics.",
+  "permissions": ["storage"],
+  "host_permissions": ["http://localhost:8080/*", "http://127.0.0.1:8080/*"],
+  "background": {"service_worker": "background.js"},
+  "content_scripts": [
+    {"matches": ["*://boardgamearena.com/*", "*://*.boardgamearena.com/*"], "js": ["bridge.js"], "run_at": "document_start", "all_frames": true},
+    {"matches": ["*://boardgamearena.com/*", "*://*.boardgamearena.com/*"], "js": ["content.js"], "css": ["content.css"], "run_at": "document_idle", "all_frames": true, "world": "MAIN"}
+  ]
+}
