@@ -20,7 +20,8 @@
     const mapValue = game.gamedatas?.table_options?.[107]?.value;
     const map = (mapValue == null ? '' : mapNames[Number(mapValue)]) || document.querySelector('#footer_option_value_107')?.textContent?.trim() || '';
     const preludeLabel = document.querySelector('#footer_option_value_104')?.textContent?.trim().toLowerCase();
-    const prelude = preludeLabel === 'on' ? true : preludeLabel === 'off' ? false : null;
+    const preludeValue = game.gamedatas?.table_options?.[104]?.value;
+    const prelude = preludeLabel === 'on' ? true : preludeLabel === 'off' ? false : String(preludeValue) === '1' ? true : String(preludeValue) === '0' ? false : null;
     return {generation, map, prelude};
   }
   function persist() { try { sessionStorage.setItem(key(), JSON.stringify(log)); } catch {} }
