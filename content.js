@@ -3,7 +3,7 @@
   if (window.__tmDraftChecker) return;
   window.__tmDraftChecker = true;
   const cache = new Map();
-  let current = null, clicked = null, log = [], lastTable = '';
+  let current = null, clicked = null, log = [], lastTable = '', enabled = false;
   const key = () => `tm-draft-checker-${location.host}-${window.gameui?.table_id || new URL(location.href).searchParams.get('table') || 'unknown'}`;
   function findDraft(node, owner, seen = new Set()) {
     if (!node || typeof node !== 'object' || seen.has(node)) return null;
@@ -25,16 +25,23 @@
     return {generation, map, prelude};
   }
   function persist() { try { sessionStorage.setItem(key(), JSON.stringify(log)); } catch {} }
+  function ensureStats(entry) {
+    const k = `${entry.generation}|${entry.map}|${entry.prelude}`;
+    if (!entry.generation || !entry.map || entry.prelude === null || cache.has(k)) return;
+    cache.set(k, {});
+    document.dispatchEvent(new CustomEvent('tm-draft-stats-request', {detail: {...entry, key:k}}));
+  }
   function panel() {
     let p = document.getElementById('tm-draft-checker'); if (p) return p;
     p = document.createElement('section'); p.id = 'tm-draft-checker';
-    p.innerHTML = '<header><b>Draft Checker</b><button type="button" title="Collapse">−</button></header><div class="body"></div>';
+    p.innerHTML = '<header><b>Draft Checker</b><div><button class="collapse" type="button" title="Collapse">−</button><button class="close" type="button" title="Turn off">×</button></div></header><div class="body"></div>';
     document.body.appendChild(p);
     const header = p.querySelector('header'); let drag;
     header.onpointerdown = e => { if (e.target.closest('button')) return; const r=p.getBoundingClientRect(); drag={x:e.clientX-r.x,y:e.clientY-r.y}; header.setPointerCapture(e.pointerId); };
     header.onpointermove = e => { if (!drag) return; p.style.left = `${Math.max(0, e.clientX-drag.x)}px`; p.style.top = `${Math.max(0,e.clientY-drag.y)}px`; p.style.right='auto'; };
     header.onpointerup = () => { drag=null; };
-    p.querySelector('button').onclick = () => { const b=p.querySelector('.body'); b.hidden=!b.hidden; };
+    p.querySelector('.collapse').onclick = () => { const b=p.querySelector('.body'); b.hidden=!b.hidden; };
+    p.querySelector('.close').onclick = () => document.dispatchEvent(new CustomEvent('tm-draft-set-enabled', {detail:false}));
     return p;
   }
   function render() {
@@ -42,26 +49,29 @@
     const note = document.createElement('p'); note.textContent='Passed cards are observed; bold cards are Elo-based guesses, not known picks.'; body.appendChild(note);
     if (!log.length) { const p=document.createElement('p'); p.textContent='Waiting for a research draft and your confirmed pick.'; body.appendChild(p); }
     for (const entry of log.slice().reverse()) {
+      ensureStats(entry);
       const section=document.createElement('section'), title=document.createElement('b'); title.textContent=`Generation ${entry.generation || '?'} · ${entry.map || 'map unknown'} · passed ${entry.cards.length}`; section.appendChild(title);
       const stats=cache.get(`${entry.generation}|${entry.map}|${entry.prelude}`); const ranked=entry.cards.map(card=>({card, data:stats?.data?.find(r=>r.cardName?.toLowerCase()===card.toLowerCase())}));
       const scored=ranked.filter(x=>x.data?.avgEloGainKept != null && Number(x.data.keptGames || 0)>=10).sort((a,b)=>b.data.avgEloGainKept-a.data.avgEloGainKept);
       for(const item of ranked){ const line=document.createElement('div'); if(scored[0]===item) line.className='guess'; line.textContent=`${item.card}${item.data?.avgEloGainKept != null ? ` (${Number(item.data.avgEloGainKept).toFixed(2)} Elo)` : ''}`; section.appendChild(line); }
       if (entry.kept) { const message=document.createElement('small'); message.textContent=`Opponent kept ${entry.kept} cards (BGA log).`; section.appendChild(message); }
-      if (!stats?.data) { const message=document.createElement('small'); message.textContent=!entry.generation || !entry.map || entry.prelude === null ? 'Generation, map or Prelude setting unavailable; no prediction.' : stats?.error ? 'Statistics unavailable; start the local statistics server.' : 'Loading statistics…'; section.appendChild(message); }
+      if (!stats?.data) { const message=document.createElement('small'); message.textContent=!entry.generation || !entry.map || entry.prelude === null ? 'Generation, map or Prelude setting unavailable; no prediction.' : stats?.error ? stats.error : 'Loading statistics…'; section.appendChild(message); }
       body.appendChild(section);
     }
   }
-  document.addEventListener('tm-draft-stats-response', e=>{cache.set(e.detail.key,e.detail.result); render();});
+  document.addEventListener('tm-draft-stats-response', e=>{cache.set(e.detail.key,e.detail.result); if(enabled) render();});
+  document.addEventListener('tm-draft-enabled', event => { enabled = event.detail === true; const p=document.getElementById('tm-draft-checker'); if(p) p.hidden=!enabled; if(enabled) update(); });
+  document.dispatchEvent(new Event('tm-draft-get-enabled'));
   document.addEventListener('click', event=>{ const el=event.target.closest('[id^="card_main_"]'); if(current && el && current.ids.includes(el.id)) clicked=el.id; },true);
   function update() {
-    const game=window.gameui; if(game?.game_name!=='terraformingmars' || !game.gamedatas?.players) return;
+    const game=window.gameui; if(!enabled || game?.game_name!=='terraformingmars' || !game.gamedatas?.players) return;
     if(key()!==lastTable){lastTable=key(); try {log=JSON.parse(sessionStorage.getItem(key())||'[]');} catch {log=[];} }
     const me=game.gamedatas.players[String(game.player_id)]; if(!me) return;
     const operation=findDraft(game.gamedatas.gamestate?.args, me.color);
     const ids=operation?.args?.target?.filter(id=>/^card_main_\d+$/.test(id)) || [];
     if(current && clicked && ids.length && ids.join('|')!==current.ids.join('|')) {
       const cards=current.ids.filter(id=>id!==clicked).map(id=>name(id,game));
-      if(cards.length){const entry={...current.context,cards};log.push(entry);persist(); const k=`${entry.generation}|${entry.map}|${entry.prelude}`;if(entry.generation && entry.map && entry.prelude !== null && !cache.has(k)){cache.set(k,{});document.dispatchEvent(new CustomEvent('tm-draft-stats-request',{detail:{...entry,key:k}}));}}
+      if(cards.length){const entry={...current.context,cards};log.push(entry);persist();ensureStats(entry);}
       clicked=null;
     }
     if(ids.length && (!current || ids.join('|')!==current.ids.join('|'))) current={ids,context:context(game)};
