@@ -3,7 +3,8 @@
   if (window.__tmDraftChecker) return;
   window.__tmDraftChecker = true;
   const cache = new Map();
-  let current = null, clicked = null, log = [], lastTable = '', enabled = false;
+  let current = null, log = [], lastTable = '', enabled = false, hookedDojo = null;
+  const seenNotifications = new Set();
   const key = () => `tm-draft-checker-${location.host}-${window.gameui?.table_id || new URL(location.href).searchParams.get('table') || 'unknown'}`;
   function findDraft(node, owner, seen = new Set()) {
     if (!node || typeof node !== 'object' || seen.has(node)) return null;
@@ -25,6 +26,77 @@
     return {generation, map, prelude};
   }
   function persist() { try { sessionStorage.setItem(key(), JSON.stringify(log)); } catch {} }
+  function syncTable() {
+    if (key() === lastTable) return;
+    lastTable = key(); current = null; seenNotifications.clear();
+    try { log = JSON.parse(sessionStorage.getItem(key()) || '[]'); } catch { log = []; }
+  }
+  function rememberReturn(ids, generation) {
+    for (const entry of log) {
+      if (entry.generation !== generation || entry.opponentPick || !entry.cardIds || entry.cardIds.length !== ids.length + 1) continue;
+      const missing = entry.cardIds.filter(id => !ids.includes(id));
+      if (missing.length === 1 && ids.every(id => entry.cardIds.includes(id))) {
+        entry.opponentPick = name(missing[0], window.gameui);
+      }
+    }
+    persist();
+  }
+  function consumeNotification(type, message) {
+    const game = window.gameui, args = message?.args || {};
+    if (!enabled || game?.game_name !== 'terraformingmars' || !game.gamedatas?.players) return;
+    syncTable();
+    const me = game.gamedatas.players[String(game.player_id)];
+    if (!me) return;
+    const generation = context(game).generation;
+    if (type === 'newPrivateState') {
+      const own = args.args?.player_operations?.[String(game.player_id)];
+      const op = findDraft(own, me.color);
+      const ids = op?.args?.target?.filter(id => /^card_main_\d+$/.test(id)) || [];
+      if (ids.length) {
+        rememberReturn(ids, generation);
+        if (!current || current.ids.join('|') !== ids.join('|')) current = {ids, context: context(game), picked: false};
+      }
+    }
+    if (type === 'tokenMoved' && String(args.player_id) === String(game.player_id) && /^card_main_\d+$/.test(args.token_id || '')) {
+      if (args.place_id === `draft_${me.color}` && current?.picked && args.token_id === current.pickId) {
+        const latest = log[log.length - 1];
+        if (latest?.pickedId === args.token_id) log.pop();
+        current.picked = false; current.pickId = null; persist();
+        return;
+      }
+      if (args.place_id === `draft_${me.color}` && current?.picked && current.ids.length === 2) rememberReturn([args.token_id], generation);
+      if (args.place_id === `draw_${me.color}` && current && !current.picked && current.ids.includes(args.token_id) && String(message.log || '').includes('draft')) {
+        current.picked = true;
+        current.pickId = args.token_id;
+        const cardIds = current.ids.filter(id => id !== args.token_id);
+        if (cardIds.length) {
+          const entry = {...current.context, pickedId: args.token_id, cardIds, cards: cardIds.map(id => name(id, game)), opponentPick: cardIds.length === 1 ? name(cardIds[0], game) : null};
+          log.push(entry); persist(); ensureStats(entry);
+        }
+      }
+    }
+    if (type === 'message' && /keeps \$\{count\}/.test(String(message.log || '')) && String(args.player_id) !== String(game.player_id) && Number.isFinite(Number(args.count))) {
+      for (const entry of log) if (entry.generation === generation) entry.kept = Number(args.count);
+      persist();
+    }
+  }
+  function installNotificationHook() {
+    const dojo = window.dojo;
+    if (!dojo || dojo === hookedDojo || typeof dojo.connect !== 'function' || typeof dojo.publish !== 'function') return;
+    dojo.connect(dojo, 'publish', function (type, args) {
+      const message = args?.[0];
+      if (!message || typeof message !== 'object') return;
+      const uid = message.uid;
+      if (uid != null) {
+        const id = `${type}:${uid}`;
+        if (seenNotifications.has(id)) return;
+        seenNotifications.add(id);
+        if (seenNotifications.size > 3000) seenNotifications.clear();
+      }
+      try { consumeNotification(type, message); } catch (error) { console.warn('[Draft Checker] notification error', error); }
+    });
+    hookedDojo = dojo;
+  }
   function ensureStats(entry) {
     const k = `${entry.generation}|${entry.map}|${entry.prelude}`;
     if (!entry.generation || !entry.map || entry.prelude === null || cache.has(k)) return;
@@ -46,15 +118,15 @@
   }
   function render() {
     const body = panel().querySelector('.body'); body.replaceChildren();
-    const note = document.createElement('p'); note.textContent='Passed cards are observed; bold cards are Elo-based guesses, not known picks.'; body.appendChild(note);
+    const note = document.createElement('p'); note.textContent='Passed cards and returned-pack deductions are observed; bold estimates are not confirmed purchases.'; body.appendChild(note);
     if (!log.length) { const p=document.createElement('p'); p.textContent='Waiting for a research draft and your confirmed pick.'; body.appendChild(p); }
     for (const entry of log.slice().reverse()) {
       ensureStats(entry);
       const section=document.createElement('section'), title=document.createElement('b'); title.textContent=`Generation ${entry.generation || '?'} · ${entry.map || 'map unknown'} · passed ${entry.cards.length}`; section.appendChild(title);
       const stats=cache.get(`${entry.generation}|${entry.map}|${entry.prelude}`); const ranked=entry.cards.map(card=>({card, data:stats?.data?.find(r=>r.cardName?.toLowerCase()===card.toLowerCase())}));
       const scored=ranked.filter(x=>x.data?.avgEloGainKept != null && Number(x.data.keptGames || 0)>=10).sort((a,b)=>b.data.avgEloGainKept-a.data.avgEloGainKept);
-      for(const item of ranked){ const line=document.createElement('div'); if(scored[0]===item) line.className='guess'; line.textContent=`${item.card}${item.data?.avgEloGainKept != null ? ` (${Number(item.data.avgEloGainKept).toFixed(2)} Elo)` : ''}`; section.appendChild(line); }
-      if (entry.kept) { const message=document.createElement('small'); message.textContent=`Opponent kept ${entry.kept} cards (BGA log).`; section.appendChild(message); }
+      for(const item of ranked){ const line=document.createElement('div'); if(item.card===entry.opponentPick || (!entry.opponentPick && scored[0]===item)) line.className='guess'; line.textContent=`${item.card}${item.card===entry.opponentPick ? ' — opponent drafted (inferred)' : !entry.opponentPick && scored[0]===item ? ' — estimated pick' : ''}${item.data?.avgEloGainKept != null ? ` (${Number(item.data.avgEloGainKept).toFixed(2)} Elo)` : ''}`; section.appendChild(line); }
+      if (entry.kept != null) { const message=document.createElement('small'); message.textContent=`Opponent bought ${entry.kept} cards in this generation (BGA log).`; section.appendChild(message); }
       if (!stats?.data) { const message=document.createElement('small'); message.textContent=!entry.generation || !entry.map || entry.prelude === null ? 'Generation, map or Prelude setting unavailable; no prediction.' : stats?.error ? stats.error : 'Loading statistics…'; section.appendChild(message); }
       body.appendChild(section);
     }
@@ -62,19 +134,14 @@
   document.addEventListener('tm-draft-stats-response', e=>{cache.set(e.detail.key,e.detail.result); if(enabled) render();});
   document.addEventListener('tm-draft-enabled', event => { enabled = event.detail === true; const p=document.getElementById('tm-draft-checker'); if(p) p.hidden=!enabled; if(enabled) update(); });
   document.dispatchEvent(new Event('tm-draft-get-enabled'));
-  document.addEventListener('click', event=>{ const el=event.target.closest('[id^="card_main_"]'); if(current && el && current.ids.includes(el.id)) clicked=el.id; },true);
   function update() {
+    installNotificationHook();
     const game=window.gameui; if(!enabled || game?.game_name!=='terraformingmars' || !game.gamedatas?.players) return;
-    if(key()!==lastTable){lastTable=key(); try {log=JSON.parse(sessionStorage.getItem(key())||'[]');} catch {log=[];} }
+    syncTable();
     const me=game.gamedatas.players[String(game.player_id)]; if(!me) return;
     const operation=findDraft(game.gamedatas.gamestate?.args, me.color);
     const ids=operation?.args?.target?.filter(id=>/^card_main_\d+$/.test(id)) || [];
-    if(current && clicked && ids.length && ids.join('|')!==current.ids.join('|')) {
-      const cards=current.ids.filter(id=>id!==clicked).map(id=>name(id,game));
-      if(cards.length){const entry={...current.context,cards};log.push(entry);persist();ensureStats(entry);}
-      clicked=null;
-    }
-    if(ids.length && (!current || ids.join('|')!==current.ids.join('|'))) current={ids,context:context(game)};
+    if(ids.length && !current) current={ids,context:context(game),picked:false};
     render();
   }
   window.setInterval(update,1000); update();
